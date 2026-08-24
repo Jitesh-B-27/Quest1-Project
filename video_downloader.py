@@ -42,31 +42,30 @@ def build_ydl_opts(output_dir: Path) -> dict:
     return opts
 
 
-def download_video(url: str, output_dir: Path = VIDEO_DIR) -> int:
+def download_video(url: str, output_dir: Path = VIDEO_DIR) -> Path:
+    """Download a video and return the local path to the resulting MP4 file."""
     if not url or not url.strip():
-        print("Error: URL cannot be empty.", file=sys.stderr)
-        return 1
+        raise yt_dlp.utils.DownloadError("URL cannot be empty.")
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
     ydl_opts = build_ydl_opts(output_dir)
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            if info is None:
-                print("Error: Could not extract video info.", file=sys.stderr)
-                return 1
-            title = info.get("title", "video")
-            filename = ydl.prepare_filename(info)
-            print(f"Downloaded: {title}")
-            print(f"Saved to: {filename}")
-            return 0
-    except yt_dlp.utils.DownloadError as e:
-        print(f"Download failed: {e}", file=sys.stderr)
-        return 1
-    except KeyboardInterrupt:
-        print("\nDownload cancelled by user.", file=sys.stderr)
-        return 130
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=True)
+        if info is None:
+            raise yt_dlp.utils.DownloadError("Could not extract video info.")
+        title = info.get("title", "video")
+        filename = Path(ydl.prepare_filename(info))
+        # merge_output_format guarantees mp4; fix extension if it differs.
+        if filename.suffix.lower() != ".mp4":
+            mp4 = filename.with_suffix(".mp4")
+            if mp4.exists():
+                filename = mp4
+            else:
+                filename = filename.with_suffix(".mp4")
+        print(f"Downloaded: {title}")
+        print(f"Saved to: {filename}")
+        return filename
 
 
 def main() -> None:
@@ -82,7 +81,15 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    sys.exit(download_video(args.url, args.output_dir))
+    try:
+        download_video(args.url, args.output_dir)
+        sys.exit(0)
+    except yt_dlp.utils.DownloadError as e:
+        print(f"Download failed: {e}", file=sys.stderr)
+        sys.exit(1)
+    except KeyboardInterrupt:
+        print("\nDownload cancelled by user.", file=sys.stderr)
+        sys.exit(130)
 
 
 if __name__ == "__main__":
