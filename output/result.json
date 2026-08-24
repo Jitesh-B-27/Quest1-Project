@@ -1,0 +1,20 @@
+{
+  "target_text": "This is a pipeline integration test",
+  "matched_text": "this is a pipeline integration test.",
+  "timestamp": 2.36,
+  "frame_number": 59,
+  "frame_image_path": "frames\\frame_59.jpg",
+  "similarity": 1.0,
+  "average_word_probability": 0.9406666666666667,
+  "minimum_word_probability": 0.772,
+  "video_path": "video\\test_e2e.mp4",
+  "audio_path": "audio\\test_e2e.wav",
+  "transcript_path": "transcript\\transcript.json",
+  "actual_timestamp": 2.36,
+  "fps": 25.0,
+  "frame_count": 176,
+  "duration": 7.04,
+  "width": 640,
+  "height": 480,
+  "word_count": 13
+}
