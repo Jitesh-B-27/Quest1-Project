@@ -1,5 +1,7 @@
 ﻿"""Tests for the pipeline orchestration (all module stages are stubbed)."""
 
+import json
+import tempfile
 import unittest
 from dataclasses import dataclass
 from pathlib import Path
@@ -159,6 +161,91 @@ class TestCLIValidation(unittest.TestCase):
         with self.assertRaises(SystemExit) as ctx:
             pipeline.main(["--url", "http://example.com/v"])
         self.assertEqual(ctx.exception.code, 2)
+
+
+class TestLocalFileSkip(unittest.TestCase):
+    """--video/--audio options skip stages 1-2 and use local files."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.calls = []
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _patch_late_stages(self):
+        from asr.models import TranscriptResult
+
+        def fake_asr(wav_path, transcript_path, *a, **kw):
+            self.calls.append(("asr", str(wav_path)))
+            result = TranscriptResult(
+                metadata={"provider": "parakeet", "word_count": 0,
+                          "audio_duration_seconds": 0,
+                          "processing_time_seconds": 0},
+                words=[])
+            result.to_json_file(transcript_path)
+            return result
+
+        def fake_match(target, transcript_result):
+            self.calls.append(("match",))
+            return FakeMatch()
+
+        def fake_frame(video_path, start_time):
+            self.calls.append(("frame",))
+            return FakeFrame()
+
+        patches = [
+            mock.patch.object(pipeline, "run_asr_stage", fake_asr),
+            mock.patch.object(pipeline, "run_matching_stage", fake_match),
+            mock.patch.object(pipeline, "run_frame_extraction_stage", fake_frame),
+        ]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_video_and_audio_skip_stages_1_and_2(self):
+        self._patch_late_stages()
+        video = self.dir / "v.mp4"
+        wav = self.dir / "v.wav"
+        video.write_bytes(b"x")
+        wav.write_bytes(b"y")
+
+        # Early stages must not be invoked.
+        with mock.patch.object(
+                pipeline, "run_download_stage",
+                side_effect=AssertionError("download should be skipped")), \
+             mock.patch.object(
+                 pipeline, "run_audio_extraction_stage",
+                 side_effect=AssertionError("extraction should be skipped")):
+            result = pipeline.run_pipeline(
+                target="hello world",
+                video_path=str(video),
+                audio_path=str(wav),
+                save_result=False)
+
+        order = [c[0] for c in self.calls]
+        self.assertEqual(order, ["asr", "match", "frame"])
+        self.assertEqual(result.video_path, str(video))
+        self.assertEqual(result.audio_path, str(wav))
+
+    def test_missing_local_video_rejected(self):
+        with self.assertRaises(PipelineError):
+            pipeline.run_pipeline(video_path=str(self.dir / "nope.mp4"),
+                                  target="hi", save_result=False)
+        with self.assertRaises(PipelineError):
+            pipeline.run_pipeline(video_path=str(self.dir / "v.mp4"),
+                                  audio_path=str(self.dir / "nope.wav"),
+                                  target="hi", save_result=False)
+
+    def test_url_and_video_mutually_exclusive(self):
+        with self.assertRaises(PipelineError):
+            pipeline.run_pipeline(url="http://x", video_path="v.mp4",
+                                  target="hi", save_result=False)
+
+    def test_neither_url_nor_video_rejected(self):
+        with self.assertRaises(PipelineError):
+            pipeline.run_pipeline(target="hi", save_result=False)
 
 
 if __name__ == "__main__":

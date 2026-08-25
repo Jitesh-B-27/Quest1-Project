@@ -24,7 +24,7 @@ from pathlib import Path
 
 import yt_dlp
 
-from asr import Transcriber
+from asr import create_asr_provider
 from asr.exceptions import ASRError
 from audio_extractor import AudioExtractionError, extract_audio
 from frame_extractor import FrameExtractor, FrameExtractorError
@@ -140,27 +140,33 @@ def run_audio_extraction_stage(video_path: Path) -> Path:
 def run_asr_stage(
     wav_path: Path,
     transcript_path: Path,
-    model_size: str,
+    provider_name: str,
+    model_size: str | None,
     device: str,
     compute_type: str,
     language: str | None,
 ):
     _stage_header(3, 5, "ASR")
     print(f"Input: {wav_path}")
-    print(f"Model: {model_size}  Device: {device}  Compute type: {compute_type}")
     print(f"Language: {language or 'auto-detect'}")
+    print(f"Provider: {provider_name}")
     print("Status: Transcribing... (this can take a while)")
-    transcriber = Transcriber(
-        model_size=model_size, device=device,
-        compute_type=compute_type, language=language,
-    )
-    result = transcriber.transcribe(wav_path)
+    try:
+        asr_provider = create_asr_provider(
+            provider=provider_name, model=model_size, device=device,
+            language=language, compute_type=compute_type,
+        )
+        print(f"Model: {asr_provider.model}  Device: {device}  "
+              f"Compute type: {compute_type}")
+        result = asr_provider.transcribe(wav_path)
+    except ASRError as e:
+        raise PipelineError(f"ASR failed: {e}") from e
     result.to_json_file(transcript_path)
     m = result.metadata
     print("Status: Complete")
-    print(f"Duration: {m['audio_duration_seconds']}s in "
+    print(f"Duration: {m.get('audio_duration_seconds')}s in "
           f"{m['processing_time_seconds']}s processing time")
-    print(f"Words: {m['word_count']} ({m['segment_count']} segments)")
+    print(f"Words: {m['word_count']} ({m.get('segment_count')} segments)")
     print(f"Output: {transcript_path}")
     return result
 
@@ -213,9 +219,12 @@ def run_frame_extraction_stage(video_path: Path, start_time: float):
 # ---------------------------------------------------------------------------
 
 def run_pipeline(
-    url: str,
-    target: str,
-    model_size: str = "small",
+    url: str | None = None,
+    target: str = "",
+    video_path: str | None = None,
+    audio_path: str | None = None,
+    asr_provider: str = "faster-whisper",
+    model_size: str | None = None,
     device: str = "cpu",
     compute_type: str = "int8",
     language: str | None = "en",
@@ -227,8 +236,11 @@ def run_pipeline(
     Raises:
         PipelineError: If any stage fails (later stages are not executed).
     """
-    if not url or not url.strip():
-        raise PipelineError("Video URL must be a non-empty string.")
+    if not url and not video_path:
+        raise PipelineError("Either a video URL (--url) or a local video "
+                            "file (--video) must be provided.")
+    if url and video_path:
+        raise PipelineError("Provide either --url or --video, not both.")
     if not isinstance(target, str) or not target.strip():
         raise PipelineError("Target dialogue must be a non-empty string.")
 
@@ -243,22 +255,41 @@ def run_pipeline(
     started = time.monotonic()
     _banner("VIDEO DIALOGUE LOCALIZATION PIPELINE")
 
-    # Stage 1: download (retries transient network errors automatically)
-    video_path = run_download_stage(url.strip(), proxy)
+    # Stage 1: download (skipped when a local video is supplied)
+    if video_path:
+        video = Path(video_path)
+        if not video.exists():
+            raise PipelineError(
+                f"Local video file does not exist: {video.resolve()}")
+        _stage_header(1, 5, "VIDEO DOWNLOAD")
+        print("Status: Skipped (using local video)")
+        print(f"Input: {video}")
+    else:
+        video = run_download_stage(url.strip(), proxy)
 
-    # Stage 2: audio extraction
-    wav_path = run_audio_extraction_stage(video_path)
+    # Stage 2: audio extraction (skipped when an extracted WAV is supplied)
+    if audio_path:
+        wav_path = Path(audio_path)
+        if not wav_path.exists():
+            raise PipelineError(
+                f"Local audio file does not exist: {wav_path.resolve()}")
+        _stage_header(2, 5, "AUDIO EXTRACTION")
+        print("Status: Skipped (using existing WAV)")
+        print(f"Input: {wav_path}")
+    else:
+        wav_path = run_audio_extraction_stage(video)
 
     # Stage 3: ASR
     transcript_result = run_asr_stage(
-        wav_path, TRANSCRIPT_PATH, model_size, device, compute_type, language,
+        wav_path, TRANSCRIPT_PATH, asr_provider, model_size, device,
+        compute_type, language,
     )
 
     # Stage 4: target matching (in-memory ASR words)
     match = run_matching_stage(target.strip(), transcript_result)
 
     # Stage 5: frame extraction at the matched start time
-    frame = run_frame_extraction_stage(video_path, match.start_time)
+    frame = run_frame_extraction_stage(video, match.start_time)
 
     result = PipelineResult(
         target_text=target.strip(),
@@ -269,7 +300,7 @@ def run_pipeline(
         similarity=match.text_similarity,
         average_word_probability=match.average_word_probability,
         minimum_word_probability=match.minimum_word_probability,
-        video_path=str(video_path),
+        video_path=str(video),
         audio_path=str(wav_path),
         transcript_path=str(TRANSCRIPT_PATH),
         actual_timestamp=frame.actual_timestamp,
@@ -302,11 +333,23 @@ def main(argv: list[str] | None = None) -> None:
                     "extract audio, transcribe, find the target dialogue, and "
                     "extract the corresponding frame.",
     )
-    parser.add_argument("--url", required=True, help="Video URL to download")
+    parser.add_argument("--url", default=None,
+                        help="Video URL to download (omit when using --video)")
     parser.add_argument("--target", required=True,
                         help="Target dialogue sentence to locate in the video")
-    parser.add_argument("--model", default="small",
-                        help="ASR model size (default: %(default)s)")
+    parser.add_argument("--video", default=None,
+                        help="Path to a local video file; skips the download stage")
+    parser.add_argument("--audio", default=None,
+                        help="Path to an existing WAV file; skips the audio "
+                             "extraction stage")
+    parser.add_argument("--asr", default="faster-whisper",
+                        choices=["faster-whisper", "whisperx", "parakeet"],
+                        help="ASR backend provider (default: %(default)s)")
+    parser.add_argument("--model", default=None,
+                        help="ASR model. Defaults per provider: whisper sizes "
+                             "(tiny/base/small/medium/large-v3) for "
+                             "faster-whisper and whisperx; a HuggingFace name "
+                             "(e.g. nvidia/parakeet-tdt-0.6b-v3) for parakeet")
     parser.add_argument("--language", default="en",
                         help="ASR language code; 'none' for auto-detect "
                              "(default: %(default)s)")
@@ -321,10 +364,18 @@ def main(argv: list[str] | None = None) -> None:
                         help="Do not write the final result JSON")
     args = parser.parse_args(argv)
 
+    if not args.url and not args.video:
+        parser.error("either --url or --video is required")
+    if args.url and args.video:
+        parser.error("--url and --video are mutually exclusive")
+
     try:
         run_pipeline(
             url=args.url,
+            video_path=args.video,
+            audio_path=args.audio,
             target=args.target,
+            asr_provider=args.asr,
             model_size=args.model,
             device=args.device,
             compute_type=args.compute_type,

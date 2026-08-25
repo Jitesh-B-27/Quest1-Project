@@ -15,3 +15,7 @@ class ModelLoadError(ASRError):
 
 class TranscriptionError(ASRError):
     """Raised when audio processing/transcription fails."""
+
+
+class DependencyError(ASRError):
+    """Raised when a backend's dependency package is not installed."""
