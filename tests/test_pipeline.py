@@ -57,7 +57,7 @@ class TestPipelineOrchestration(unittest.TestCase):
     def setUp(self):
         self.calls = []
 
-        def fake_download(url):
+        def fake_download(url, proxy=None):
             self.calls.append(("download", url))
             return Path("video/fake.mp4")
 
@@ -138,7 +138,7 @@ class TestPipelineOrchestration(unittest.TestCase):
         self.assertEqual(self.calls, [])
 
     def test_downloader_failure_wrapped(self):
-        def failing_download(url):
+        def failing_download(url, proxy=None):
             raise PipelineError("Video download failed: unreachable")
 
         with mock.patch.object(pipeline, "run_download_stage", failing_download):

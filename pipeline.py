@@ -1,4 +1,4 @@
-"""V1 end-to-end video-dialogue localization pipeline.
+﻿"""V1 end-to-end video-dialogue localization pipeline.
 
 Connects the five existing modules through their Python APIs:
 
@@ -16,9 +16,10 @@ CLI:
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import yt_dlp
@@ -28,6 +29,7 @@ from asr.exceptions import ASRError
 from audio_extractor import AudioExtractionError, extract_audio
 from frame_extractor import FrameExtractor, FrameExtractorError
 from matcher import DialogueMatcher, MatcherError
+from matcher.core import MatchNotFoundError
 from matcher.core import Word as MatcherWord
 
 VIDEO_DIR = Path("video")
@@ -35,6 +37,9 @@ AUDIO_DIR = Path("audio")
 TRANSCRIPT_PATH = Path("transcript/transcript.json")
 FRAMES_DIR = Path("frames")
 OUTPUT_DIR = Path("output")
+
+DOWNLOAD_ATTEMPTS = 5
+DOWNLOAD_RETRY_DELAY = 10
 
 
 class PipelineError(Exception):
@@ -68,8 +73,7 @@ class PipelineResult:
     def save(self, path: str | Path = OUTPUT_DIR / "result.json") -> Path:
         out = Path(path)
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(__import__("json").dumps(self.to_dict(), indent=2),
-                       encoding="utf-8")
+        out.write_text(json.dumps(self.to_dict(), indent=2), encoding="utf-8")
         return out
 
 
@@ -95,16 +99,26 @@ def _stage_header(index: int, total: int, name: str) -> None:
 # Stage wrappers (one per pipeline stage; each returns the next stage's input)
 # ---------------------------------------------------------------------------
 
-def run_download_stage(url: str) -> Path:
+def run_download_stage(url: str, proxy: str | None = None) -> Path:
     from video_downloader import download_video
 
     _stage_header(1, 5, "VIDEO DOWNLOAD")
     print(f"URL: {url}")
-    print("Status: Downloading...")
+    if proxy:
+        print(f"Proxy: {proxy}")
+    print(f"Status: Downloading (up to {DOWNLOAD_ATTEMPTS} attempts for "
+          f"flaky networks)...")
     try:
-        video_path = download_video(url, VIDEO_DIR)
+        video_path = download_video(
+            url, VIDEO_DIR, proxy,
+            attempts=DOWNLOAD_ATTEMPTS, retry_delay=DOWNLOAD_RETRY_DELAY,
+        )
     except yt_dlp.utils.DownloadError as e:
-        raise PipelineError(f"Video download failed: {e}") from e
+        raise PipelineError(
+            f"Video download failed after {DOWNLOAD_ATTEMPTS} attempts. "
+            f"If your network intermittently blocks this host, try again or "
+            f"use a VPN/proxy (--proxy). Error: {e}"
+        ) from e
     print("Status: Complete")
     print(f"Output: {video_path}")
     return video_path
@@ -130,7 +144,7 @@ def run_asr_stage(
     device: str,
     compute_type: str,
     language: str | None,
-) -> tuple:
+):
     _stage_header(3, 5, "ASR")
     print(f"Input: {wav_path}")
     print(f"Model: {model_size}  Device: {device}  Compute type: {compute_type}")
@@ -151,9 +165,7 @@ def run_asr_stage(
     return result
 
 
-def run_matching_stage(target: str, transcript_result) -> object:
-    from matcher.core import MatchNotFoundError
-
+def run_matching_stage(target: str, transcript_result):
     _stage_header(4, 5, "TARGET MATCHING")
     print(f'Target: "{target}"')
     print("Status: Searching transcript...")
@@ -179,7 +191,7 @@ def run_matching_stage(target: str, transcript_result) -> object:
     return match
 
 
-def run_frame_extraction_stage(video_path: Path, start_time: float) -> object:
+def run_frame_extraction_stage(video_path: Path, start_time: float):
     _stage_header(5, 5, "FRAME EXTRACTION")
     print(f"Input: {video_path}")
     print(f"Timestamp: {start_time:.3f}s")
@@ -207,6 +219,7 @@ def run_pipeline(
     device: str = "cpu",
     compute_type: str = "int8",
     language: str | None = "en",
+    proxy: str | None = None,
     save_result: bool = True,
 ) -> PipelineResult:
     """Run all five stages in order and return the combined result.
@@ -219,11 +232,19 @@ def run_pipeline(
     if not isinstance(target, str) or not target.strip():
         raise PipelineError("Target dialogue must be a non-empty string.")
 
+    # Console may use a legacy codepage (cp1252); never crash on unicode output.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(errors="replace")
+            except Exception:
+                pass
+
     started = time.monotonic()
     _banner("VIDEO DIALOGUE LOCALIZATION PIPELINE")
 
-    # Stage 1: download
-    video_path = run_download_stage(url)
+    # Stage 1: download (retries transient network errors automatically)
+    video_path = run_download_stage(url.strip(), proxy)
 
     # Stage 2: audio extraction
     wav_path = run_audio_extraction_stage(video_path)
@@ -260,10 +281,7 @@ def run_pipeline(
         word_count=len(transcript_result.words),
     )
 
-    if save_result:
-        saved = result.save()
-    else:
-        saved = OUTPUT_DIR / "result.json"
+    saved = result.save() if save_result else OUTPUT_DIR / "result.json"
 
     _banner("PIPELINE COMPLETE")
     print(f"\nTotal time: {time.monotonic() - started:.1f}s")
@@ -296,6 +314,9 @@ def main(argv: list[str] | None = None) -> None:
                         help="ASR device (default: %(default)s)")
     parser.add_argument("--compute-type", default="int8",
                         help="ASR compute type (default: %(default)s)")
+    parser.add_argument("--proxy", default=None,
+                        help="Optional proxy URL for the download stage, "
+                             "e.g. socks5://127.0.0.1:1080")
     parser.add_argument("--no-save", action="store_true",
                         help="Do not write the final result JSON")
     args = parser.parse_args(argv)
@@ -308,6 +329,7 @@ def main(argv: list[str] | None = None) -> None:
             device=args.device,
             compute_type=args.compute_type,
             language=None if args.language.lower() == "none" else args.language,
+            proxy=args.proxy,
             save_result=not args.no_save,
         )
     except PipelineError as e:

@@ -28,3 +28,8 @@ venv/
 .idea/
 .DS_Store
 Thumbs.db
+
+/transcript
+/audio
+pipeline_run.log
+*.jpg
