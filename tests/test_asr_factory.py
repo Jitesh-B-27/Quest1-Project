@@ -7,6 +7,7 @@ from asr.factory import MODEL_TYPES, create_provider, normalize_model_type
 from asr.providers.base import BaseASRProvider
 from asr.providers.faster_whisper_provider import FasterWhisperProvider
 from asr.providers.openai_whisper_provider import OpenAIWhisperProvider
+from asr.providers.whisperx_provider import WhisperXProvider
 from asr.transcriber import Transcriber
 
 
@@ -16,12 +17,15 @@ class TestProviderFactory(unittest.TestCase):
                       FasterWhisperProvider)
         self.assertIs(create_provider("whisper", "base").__class__,
                       OpenAIWhisperProvider)
+        self.assertIs(create_provider("whisperx", "base").__class__,
+                      WhisperXProvider)
 
     def test_aliases_normalize(self):
         self.assertEqual(normalize_model_type("whisper"), "whisper")
         self.assertEqual(normalize_model_type("faster_whisper"),
                          "faster-whisper")
         self.assertEqual(normalize_model_type("OpenAI-Whisper"), "whisper")
+        self.assertEqual(normalize_model_type("Whisper-X"), "whisperx")
 
     def test_unknown_model_type_rejected(self):
         with self.assertRaises(ValidationError):

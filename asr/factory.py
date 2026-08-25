@@ -6,10 +6,12 @@ from asr.exceptions import ValidationError
 from asr.providers.base import BaseASRProvider
 from asr.providers.faster_whisper_provider import FasterWhisperProvider
 from asr.providers.openai_whisper_provider import OpenAIWhisperProvider
+from asr.providers.whisperx_provider import WhisperXProvider
 
 MODEL_TYPES: dict[str, type[BaseASRProvider]] = {
     "faster-whisper": FasterWhisperProvider,
     "whisper": OpenAIWhisperProvider,
+    "whisperx": WhisperXProvider,
 }
 
 # Aliases accepted on the CLI for convenience.
@@ -18,6 +20,7 @@ _MODEL_TYPE_ALIASES = {
     "fasterwhisper": "faster-whisper",
     "openai-whisper": "whisper",
     "openai_whisper": "whisper",
+    "whisper-x": "whisperx",
 }
 
 

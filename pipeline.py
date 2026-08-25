@@ -14,7 +14,7 @@ CLI:
 
 Cache reuse (skips download/audio-extraction stages when media already exists):
     python pipeline.py --video-path video --audio-path audio \
-        --target "..." --model-type whisper --model base
+        --target "..." --model-type whisperx --model base
 """
 
 from __future__ import annotations
@@ -386,7 +386,7 @@ def main(argv: list[str] | None = None) -> None:
                         help="ASR model size: tiny, base, small, medium, large "
                              "(default: %(default)s)")
     parser.add_argument("--model-type", default="faster-whisper",
-                        choices=["faster-whisper", "whisper"],
+                        choices=["faster-whisper", "whisper", "whisperx"],
                         help="ASR backend (default: %(default)s)")
     parser.add_argument("--language", default="en",
                         help="ASR language code; 'none' for auto-detect "

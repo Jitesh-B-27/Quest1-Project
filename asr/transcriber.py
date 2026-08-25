@@ -2,7 +2,7 @@
 
 The public contract is unchanged: an audio file goes in and a
 ``transcript.json`` comes out. The backend is selected via ``model_type``
-(``faster-whisper`` or ``whisper``) and the checkpoint size via
+(``faster-whisper``, ``whisper`` or ``whisperx``) and the checkpoint size via
 ``model_size`` (``tiny``, ``base``, ``small``, ...).
 
 Run as a module:
@@ -34,7 +34,7 @@ class Transcriber:
 
     Args:
         model_size: Whisper checkpoint size (tiny, base, small, medium, large).
-        model_type: Backend to use ('faster-whisper' or 'whisper').
+        model_type: Backend to use ('faster-whisper', 'whisper' or 'whisperx').
         device: Inference device (e.g. 'cpu').
         compute_type: Backend-specific quantization hint (e.g. 'int8' for
             faster-whisper on CPU); ignored by backends that do not use it.
