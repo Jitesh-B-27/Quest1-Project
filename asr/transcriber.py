@@ -1,7 +1,13 @@
 """Core Transcriber implementation and CLI entrypoint.
 
+The public contract is unchanged: an audio file goes in and a
+``transcript.json`` comes out. The backend is selected via ``model_type``
+(``faster-whisper`` or ``whisper``) and the checkpoint size via
+``model_size`` (``tiny``, ``base``, ``small``, ...).
+
 Run as a module:
-    python -m asr.transcriber --input audio/audio.wav --output transcript/transcript.json
+    python -m asr --input audio/audio.wav --output transcript/transcript.json \
+        --model-type whisper --model base
 """
 
 from __future__ import annotations
@@ -11,73 +17,61 @@ import sys
 import time
 from pathlib import Path
 
-from faster_whisper import WhisperModel
-
-from asr.exceptions import ModelLoadError, TranscriptionError, ValidationError
-from asr.models import TranscriptResult, Word
+from asr.exceptions import ASRError, ModelLoadError, TranscriptionError, ValidationError
+from asr.factory import MODEL_TYPES, create_provider, normalize_model_type
+from asr.models import TranscriptResult
+from asr.providers.base import validate_audio_path
 
 DEFAULT_INPUT = Path("audio/audio.wav")
 DEFAULT_OUTPUT = Path("transcript/transcript.json")
 DEFAULT_MODEL_SIZE = "small"
-VALID_MODEL_SIZES = ("tiny", "base", "small", "medium")
-
-
-def _validate_audio_path(path: Path) -> None:
-    """Validate the input audio path before processing."""
-    if not path.exists():
-        raise ValidationError(f"Input file does not exist: {path.resolve()}")
-    if not path.is_file():
-        raise ValidationError(f"Input path is not a file: {path.resolve()}")
-    try:
-        if path.stat().st_size == 0:
-            raise ValidationError(f"Input file is empty: {path.resolve()}")
-    except OSError as e:
-        raise ValidationError(f"Cannot read input file '{path}': {e}") from e
+DEFAULT_MODEL_TYPE = "faster-whisper"
+VALID_MODEL_SIZES = ("tiny", "base", "small", "medium", "large")
 
 
 class Transcriber:
-    """faster-whisper transcription with word-level timestamps.
+    """Model-agnostic transcription facade.
 
     Args:
-        model_size: Whisper model size (tiny, base, small, medium).
+        model_size: Whisper checkpoint size (tiny, base, small, medium, large).
+        model_type: Backend to use ('faster-whisper' or 'whisper').
         device: Inference device (e.g. 'cpu').
-        compute_type: CTranslate2 compute type (e.g. 'int8' for CPU).
+        compute_type: Backend-specific quantization hint (e.g. 'int8' for
+            faster-whisper on CPU); ignored by backends that do not use it.
         language: ISO language code to force ('en'); None for auto-detect.
     """
 
     def __init__(
         self,
         model_size: str = DEFAULT_MODEL_SIZE,
+        model_type: str = DEFAULT_MODEL_TYPE,
         device: str = "cpu",
-        compute_type: str = "int8",
+        compute_type: str | None = None,
         language: str | None = "en",
     ) -> None:
         if model_size not in VALID_MODEL_SIZES:
             raise ValidationError(
-                f"Invalid model size '{model_size}'. Valid options: {', '.join(VALID_MODEL_SIZES)}"
+                f"Invalid model size '{model_size}'. "
+                f"Valid options: {', '.join(VALID_MODEL_SIZES)}"
             )
         self.model_size = model_size
+        # Raises ValidationError for unknown backends.
+        self.model_type = normalize_model_type(model_type)
         self.device = device
         self.compute_type = compute_type
         self.language = language
-        self._model: WhisperModel | None = None
+        self._provider = create_provider(
+            model_type=self.model_type,
+            model_size=model_size,
+            device=device,
+            compute_type=compute_type,
+            language=language,
+        )
 
     @property
-    def model(self) -> WhisperModel:
-        """Lazily loaded WhisperModel instance."""
-        if self._model is None:
-            try:
-                self._model = WhisperModel(
-                    self.model_size,
-                    device=self.device,
-                    compute_type=self.compute_type,
-                )
-            except Exception as e:
-                raise ModelLoadError(
-                    f"Failed to load model '{self.model_size}' "
-                    f"(device={self.device}, compute_type={self.compute_type}): {e}"
-                ) from e
-        return self._model
+    def provider(self):
+        """The underlying backend instance (loaded lazily on transcribe)."""
+        return self._provider
 
     def transcribe(self, audio_path: str | Path) -> TranscriptResult:
         """Transcribe audio and return a structured result.
@@ -85,61 +79,23 @@ class Transcriber:
         Raises:
             ValidationError: If the input file is missing/empty/unreadable.
             ModelLoadError: If the model cannot be loaded.
-            TranscriptionError: If transcription fails or yields no words.
+            TranscriptionError: If transcription fails.
         """
-        source = Path(audio_path)
-        _validate_audio_path(source)
-
-        start = time.monotonic()
-        try:
-            segments_iter, info = self.model.transcribe(
-                str(source),
-                language=self.language,
-                vad_filter=True,
-                word_timestamps=True,
-            )
-            words: list[Word] = []
-            segment_count = 0
-            for seg in segments_iter:
-                segment_count += 1
-                for w in getattr(seg, "words", None) or []:
-                    words.append(
-                        Word(
-                            word=w.word.strip(),
-                            start=round(float(w.start), 3),
-                            end=round(float(w.end), 3),
-                            probability=round(float(w.probability), 3),
-                        )
-                    )
-        except ASRError:
-            raise
-        except Exception as e:
-            raise TranscriptionError(f"Transcription failed for '{source.name}': {e}") from e
-
-        elapsed = time.monotonic() - start
-        metadata = {
-            "input_audio": str(source),
-            "model": self.model_size,
-            "device": self.device,
-            "compute_type": self.compute_type,
-            "language": self.language,
-            "audio_duration_seconds": round(float(info.duration), 3),
-            "processing_time_seconds": round(elapsed, 3),
-            "word_count": len(words),
-            "segment_count": segment_count,
-        }
-        return TranscriptResult(metadata=metadata, words=words)
+        return self._provider.transcribe(audio_path)
 
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
-        prog="python -m asr.transcriber",
-        description="Transcribe a WAV file with word-level timestamps via faster-whisper.",
+        prog="python -m asr",
+        description="Transcribe a WAV file with word-level timestamps.",
     )
     parser.add_argument("--input", type=Path, default=DEFAULT_INPUT,
-                        help=f"Input WAV file (default: {DEFAULT_INPUT})")
+                        help=f"Input audio file (default: {DEFAULT_INPUT})")
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT,
-                        help=f"Output JSON file (default: {DEFAULT_OUTPUT})")
+                        help=f"Output transcript JSON file (default: {DEFAULT_OUTPUT})")
+    parser.add_argument("--model-type", default=DEFAULT_MODEL_TYPE,
+                        choices=sorted(MODEL_TYPES),
+                        help="ASR backend (default: %(default)s)")
     parser.add_argument("--model", default=DEFAULT_MODEL_SIZE,
                         choices=list(VALID_MODEL_SIZES),
                         help="Model size (default: %(default)s)")
@@ -147,21 +103,24 @@ def main(argv: list[str] | None = None) -> None:
                         help="Language code; 'none' for auto-detect (default: %(default)s)")
     parser.add_argument("--device", default="cpu",
                         help="Inference device (default: %(default)s)")
-    parser.add_argument("--compute-type", default="int8",
-                        help="CTranslate2 compute type (default: %(default)s)")
+    parser.add_argument("--compute-type", default=None,
+                        help="Backend compute type, e.g. 'int8' for faster-whisper "
+                             "(default: backend default)")
     args = parser.parse_args(argv)
 
     try:
         transcriber = Transcriber(
             model_size=args.model,
+            model_type=args.model_type,
             device=args.device,
             compute_type=args.compute_type,
             language=None if args.language.lower() == "none" else args.language,
         )
-        print(f"Loading model '{args.model}' on {args.device} ({args.compute_type})...")
+        print(f"Loading model '{args.model}' ({args.model_type}) on "
+              f"{args.device}...")
         result = transcriber.transcribe(args.input)
         out_path = result.to_json_file(args.output)
-    except (ValidationError, ModelLoadError, TranscriptionError) as e:
+    except ASRError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
     except OSError as e:
@@ -172,7 +131,9 @@ def main(argv: list[str] | None = None) -> None:
     print("Transcription complete.")
     print(f"  Input:      {m['input_audio']}")
     print(f"  Output:     {out_path}")
-    print(f"  Duration:   {m['audio_duration_seconds']}s in {m['processing_time_seconds']}s")
+    print(f"  Model:      {m['model']} ({m['model_type']})")
+    print(f"  Duration:   {m['audio_duration_seconds']}s in "
+          f"{m['processing_time_seconds']}s")
     print(f"  Segments:   {m['segment_count']}  Words: {m['word_count']}")
 
 

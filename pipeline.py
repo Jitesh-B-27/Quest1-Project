@@ -11,6 +11,10 @@ Python API:
 
 CLI:
     python pipeline.py --url "https://..." --target "My mind rebels at stagnation"
+
+Cache reuse (skips download/audio-extraction stages when media already exists):
+    python pipeline.py --video-path video --audio-path audio \
+        --target "..." --model-type whisper --model base
 """
 
 from __future__ import annotations
@@ -37,6 +41,9 @@ AUDIO_DIR = Path("audio")
 TRANSCRIPT_PATH = Path("transcript/transcript.json")
 FRAMES_DIR = Path("frames")
 OUTPUT_DIR = Path("output")
+
+VIDEO_EXTENSIONS = {".mp4", ".mkv", ".webm", ".avi", ".mov"}
+AUDIO_EXTENSIONS = {".wav"}
 
 DOWNLOAD_ATTEMPTS = 5
 DOWNLOAD_RETRY_DELAY = 10
@@ -96,6 +103,31 @@ def _stage_header(index: int, total: int, name: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Media cache resolution helpers
+# ---------------------------------------------------------------------------
+
+def resolve_media_path(value: str | Path, extensions: set[str],
+                       label: str) -> Path:
+    """Resolve a cached media file or directory to a concrete file path.
+
+    Accepts either a direct file path or a directory (first matching file
+    inside, sorted by name). Raises PipelineError when nothing is found.
+    """
+    p = Path(value)
+    if p.is_file():
+        return p
+    if p.is_dir():
+        for candidate in sorted(p.iterdir()):
+            if candidate.is_file() and candidate.suffix.lower() in extensions:
+                return candidate
+        raise PipelineError(
+            f"No {label} file found in directory '{p}' "
+            f"(looked for: {', '.join(sorted(extensions))})"
+        )
+    raise PipelineError(f"Cached {label} path does not exist: {p.resolve()}")
+
+
+# ---------------------------------------------------------------------------
 # Stage wrappers (one per pipeline stage; each returns the next stage's input)
 # ---------------------------------------------------------------------------
 
@@ -141,17 +173,19 @@ def run_asr_stage(
     wav_path: Path,
     transcript_path: Path,
     model_size: str,
+    model_type: str,
     device: str,
-    compute_type: str,
+    compute_type: str | None,
     language: str | None,
 ):
     _stage_header(3, 5, "ASR")
     print(f"Input: {wav_path}")
-    print(f"Model: {model_size}  Device: {device}  Compute type: {compute_type}")
+    print(f"Model: {model_size} ({model_type})  Device: {device}  "
+          f"Compute type: {compute_type or 'backend default'}")
     print(f"Language: {language or 'auto-detect'}")
     print("Status: Transcribing... (this can take a while)")
     transcriber = Transcriber(
-        model_size=model_size, device=device,
+        model_size=model_size, model_type=model_type, device=device,
         compute_type=compute_type, language=language,
     )
     result = transcriber.transcribe(wav_path)
@@ -213,22 +247,29 @@ def run_frame_extraction_stage(video_path: Path, start_time: float):
 # ---------------------------------------------------------------------------
 
 def run_pipeline(
-    url: str,
-    target: str,
+    url: str | None = None,
+    target: str = "",
     model_size: str = "small",
+    model_type: str = "faster-whisper",
     device: str = "cpu",
-    compute_type: str = "int8",
+    compute_type: str | None = None,
     language: str | None = "en",
     proxy: str | None = None,
     save_result: bool = True,
+    video_path: str | Path | None = None,
+    audio_path: str | Path | None = None,
 ) -> PipelineResult:
     """Run all five stages in order and return the combined result.
+
+    Media caching: pass ``video_path`` and/or ``audio_path`` (a file or a
+    directory containing one) to reuse existing media. When a cached video
+    is supplied, stage 1 is skipped; when a cached audio file is supplied,
+    stage 2 is skipped. ``url`` is only required when no cached video is
+    available.
 
     Raises:
         PipelineError: If any stage fails (later stages are not executed).
     """
-    if not url or not url.strip():
-        raise PipelineError("Video URL must be a non-empty string.")
     if not isinstance(target, str) or not target.strip():
         raise PipelineError("Target dialogue must be a non-empty string.")
 
@@ -243,22 +284,50 @@ def run_pipeline(
     started = time.monotonic()
     _banner("VIDEO DIALOGUE LOCALIZATION PIPELINE")
 
-    # Stage 1: download (retries transient network errors automatically)
-    video_path = run_download_stage(url.strip(), proxy)
+    print(f"Model type: {model_type}  Model size: {model_size}")
 
-    # Stage 2: audio extraction
-    wav_path = run_audio_extraction_stage(video_path)
+    cached_video = (
+        resolve_media_path(video_path, VIDEO_EXTENSIONS, "video")
+        if video_path else None
+    )
+    cached_audio = (
+        resolve_media_path(audio_path, AUDIO_EXTENSIONS, "audio")
+        if audio_path else None
+    )
+
+    # Stage 1: download (skipped when a cached video is supplied)
+    video_path_resolved: Path
+    if cached_video is not None:
+        _stage_header(1, 5, "VIDEO DOWNLOAD - SKIPPED (CACHE HIT)")
+        print(f"Using cached video: {cached_video}")
+        video_path_resolved = cached_video
+    else:
+        if not url or not url.strip():
+            raise PipelineError(
+                "No video available: provide --url or an existing "
+                "--video-path to skip the download stage."
+            )
+        video_path_resolved = run_download_stage(url.strip(), proxy)
+
+    # Stage 2: audio extraction (skipped when a cached WAV is supplied)
+    if cached_audio is not None:
+        _stage_header(2, 5, "AUDIO EXTRACTION - SKIPPED (CACHE HIT)")
+        print(f"Using cached audio: {cached_audio}")
+        wav_path = cached_audio
+    else:
+        wav_path = run_audio_extraction_stage(video_path_resolved)
 
     # Stage 3: ASR
     transcript_result = run_asr_stage(
-        wav_path, TRANSCRIPT_PATH, model_size, device, compute_type, language,
+        wav_path, TRANSCRIPT_PATH, model_size, model_type,
+        device, compute_type, language,
     )
 
     # Stage 4: target matching (in-memory ASR words)
     match = run_matching_stage(target.strip(), transcript_result)
 
     # Stage 5: frame extraction at the matched start time
-    frame = run_frame_extraction_stage(video_path, match.start_time)
+    frame = run_frame_extraction_stage(video_path_resolved, match.start_time)
 
     result = PipelineResult(
         target_text=target.strip(),
@@ -269,7 +338,7 @@ def run_pipeline(
         similarity=match.text_similarity,
         average_word_probability=match.average_word_probability,
         minimum_word_probability=match.minimum_word_probability,
-        video_path=str(video_path),
+        video_path=str(video_path_resolved),
         audio_path=str(wav_path),
         transcript_path=str(TRANSCRIPT_PATH),
         actual_timestamp=frame.actual_timestamp,
@@ -302,18 +371,32 @@ def main(argv: list[str] | None = None) -> None:
                     "extract audio, transcribe, find the target dialogue, and "
                     "extract the corresponding frame.",
     )
-    parser.add_argument("--url", required=True, help="Video URL to download")
+    parser.add_argument("--url", default=None,
+                        help="Video URL to download (optional if --video-path "
+                             "points to an existing video)")
+    parser.add_argument("--video-path", default=None,
+                        help="Optional cached video file or directory; skips "
+                             "the download stage (stage 1)")
+    parser.add_argument("--audio-path", default=None,
+                        help="Optional cached WAV audio file or directory; "
+                             "skips the audio extraction stage (stage 2)")
     parser.add_argument("--target", required=True,
                         help="Target dialogue sentence to locate in the video")
     parser.add_argument("--model", default="small",
-                        help="ASR model size (default: %(default)s)")
+                        help="ASR model size: tiny, base, small, medium, large "
+                             "(default: %(default)s)")
+    parser.add_argument("--model-type", default="faster-whisper",
+                        choices=["faster-whisper", "whisper"],
+                        help="ASR backend (default: %(default)s)")
     parser.add_argument("--language", default="en",
                         help="ASR language code; 'none' for auto-detect "
                              "(default: %(default)s)")
     parser.add_argument("--device", default="cpu",
                         help="ASR device (default: %(default)s)")
-    parser.add_argument("--compute-type", default="int8",
-                        help="ASR compute type (default: %(default)s)")
+    parser.add_argument("--compute-type", default=None,
+                        help="ASR compute type, e.g. 'int8' for faster-whisper; "
+                             "ignored by the 'whisper' backend "
+                             "(default: backend default)")
     parser.add_argument("--proxy", default=None,
                         help="Optional proxy URL for the download stage, "
                              "e.g. socks5://127.0.0.1:1080")
@@ -326,11 +409,14 @@ def main(argv: list[str] | None = None) -> None:
             url=args.url,
             target=args.target,
             model_size=args.model,
+            model_type=args.model_type,
             device=args.device,
             compute_type=args.compute_type,
             language=None if args.language.lower() == "none" else args.language,
             proxy=args.proxy,
             save_result=not args.no_save,
+            video_path=args.video_path,
+            audio_path=args.audio_path,
         )
     except PipelineError as e:
         _stage_failure(str(e))
