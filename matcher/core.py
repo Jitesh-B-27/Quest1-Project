@@ -13,9 +13,10 @@ import json
 import re
 import string
 from dataclasses import dataclass, field
-from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
+
+from rapidfuzz import fuzz
 
 
 class MatcherError(Exception):
@@ -125,14 +126,19 @@ def generate_windows(words: list[Word], target_len: int) -> list[list[Word]]:
 
 
 # ---------------------------------------------------------------------------
-# Similarity calculation (V1: lexical ratio on normalized text)
+# Similarity calculation (RapidFuzz indel ratio on normalized text)
 # ---------------------------------------------------------------------------
 
 def text_similarity(target_norm: str, window_norm: str) -> float:
-    """Normalized lexical similarity in [0.0, 1.0] (1.0 = exact match)."""
+    """Normalized lexical similarity in [0.0, 1.0] (1.0 = exact match).
+
+    Uses RapidFuzz's ``fuzz.ratio`` (C++ indel distance), a drop-in
+    replacement for ``difflib.SequenceMatcher.ratio`` that is orders of
+    magnitude faster on CPU.
+    """
     if not target_norm or not window_norm:
         return 0.0
-    return SequenceMatcher(None, target_norm, window_norm).ratio()
+    return fuzz.ratio(target_norm, window_norm) / 100.0
 
 
 # ---------------------------------------------------------------------------
