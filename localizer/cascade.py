@@ -119,8 +119,12 @@ def run_cascade(
     compute_type: str | None = None,
     regions_dir: str | Path = REGIONS_DIR,
     log: LogFn | None = None,
+    progress=None,
 ) -> CascadeResult:
     """Locate ``target`` inside the full-audio WAV; returns a CascadeResult.
+
+    ``progress(stage_key, message)`` is an optional reporting hook emitting
+    stage keys: coarse_asr, candidate_generation, fine_validation, alignment.
 
     Raises:
         LocalizationError: On malformed input or FFmpeg extraction failure.
@@ -135,9 +139,17 @@ def run_cascade(
         if log:
             log(msg)
 
+    def emit(stage: str, message: str) -> None:
+        if progress:
+            try:
+                progress(stage, message)
+            except Exception:
+                pass  # Reporting must never break the pipeline.
+
     for tier_index, coarse_model in enumerate(coarse_tiers):
         tier_name = f"{coarse_model}->{fine_model}"
 
+        emit("coarse_asr", f"Running coarse ASR ({coarse_model}) on full audio...")
         t0 = time.monotonic()
         coarse = _transcribe(coarse_model, wav_path, language, device, compute_type)
         timings[f"coarse_asr_{coarse_model}_s"] = round(time.monotonic() - t0, 3)
@@ -151,6 +163,9 @@ def run_cascade(
         regions = generate_top_k(coarse.words, target, top_k=top_k)
         if not regions:
             continue
+        emit("candidate_generation",
+             f"Generated {len(regions)} candidate region(s) from "
+             f"{len(coarse.words)} coarse words")
         regions = pad_and_merge(regions, margin_s=region_margin_s,
                                 audio_duration=float(duration) if duration else None)
         say(f"Candidate regions after pad/merge: {len(regions)}")
@@ -164,6 +179,8 @@ def run_cascade(
             time.monotonic() - t0, 3)
 
         t0 = time.monotonic()
+        emit("fine_validation",
+             f"Fine ASR ({fine_model}) + validation on {len(wav_regions)} region(s)...")
         best = _validate_regions(wav_regions, target.strip(), fine_model,
                                  min_similarity, language, device, compute_type,
                                  log)
@@ -179,6 +196,7 @@ def run_cascade(
         # Forced alignment: refine ONLY the winning region's timestamps.
         onset_local = match.start_time
         aligned = False
+        emit("alignment", "Forced alignment on winning region...")
         t0 = time.monotonic()
         try:
             refined = refine_word_timestamps(

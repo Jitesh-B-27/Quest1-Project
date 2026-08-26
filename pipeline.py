@@ -27,7 +27,7 @@ import argparse
 import json
 import sys
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 import yt_dlp
@@ -93,6 +93,7 @@ class PipelineResult:
     fallback_tier: str = ""
     aligned: bool = False
     timestamp_hhmmss: str = ""
+    stage_timings: dict = field(default_factory=dict)  # V2 cascade timings only
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -281,11 +282,14 @@ def _prepare_media(
     proxy: str | None,
     video_path: str | Path | None,
     audio_path: str | Path | None,
+    progress=None,
 ) -> tuple[Path, Path]:
     """Resolve cached media and run download/extraction only when needed.
 
     Returns ``(video_resolved, wav_resolved)``. Shared by V1 and V2 so
     neither architecture ever re-downloads or re-extracts cached media.
+
+    ``progress(stage_key, message)`` is an optional reporting hook.
     """
     cached_video = (
         resolve_media_path(video_path, VIDEO_EXTENSIONS, "video")
@@ -299,6 +303,8 @@ def _prepare_media(
     if cached_video is not None:
         _stage_header(1, 5, "VIDEO DOWNLOAD - SKIPPED (CACHE HIT)")
         print(f"Using cached video: {cached_video}")
+        if progress:
+            progress("download", f"Skipped (cache hit): {cached_video.name}")
         video_resolved = cached_video
     else:
         if not url or not url.strip():
@@ -306,14 +312,24 @@ def _prepare_media(
                 "No video available: provide --url or an existing "
                 "--video-path to skip the download stage."
             )
+        if progress:
+            progress("download", "Downloading video...")
         video_resolved = run_download_stage(url.strip(), proxy)
+        if progress:
+            progress("download", f"Downloaded: {Path(video_resolved).name}")
 
     if cached_audio is not None:
         _stage_header(2, 5, "AUDIO EXTRACTION - SKIPPED (CACHE HIT)")
         print(f"Using cached audio: {cached_audio}")
+        if progress:
+            progress("audio_extraction", f"Skipped (cache hit): {cached_audio.name}")
         wav_resolved = cached_audio
     else:
+        if progress:
+            progress("audio_extraction", "Extracting audio from video...")
         wav_resolved = run_audio_extraction_stage(video_resolved)
+        if progress:
+            progress("audio_extraction", f"Extracted: {Path(wav_resolved).name}")
     return video_resolved, wav_resolved
 
 
@@ -418,6 +434,8 @@ def run_pipeline_v2(
     audio_path: str | Path | None = None,
     regions_dir: str | Path = REGIONS_DIR,
     keep_regions: bool = False,
+    progress=None,
+    log=None,
 ) -> PipelineResult:
     """V2 coarse-to-fine pipeline.
 
@@ -426,6 +444,9 @@ def run_pipeline_v2(
     onset. Falls back to full-audio small (V1 behavior) on the SAME media if
     every tier fails. Temp region WAVs live under ``regions_dir`` and are
     deleted on success unless ``keep_regions`` is set.
+
+    ``progress(stage_key, message)`` is an optional reporting hook for web
+    UIs; when ``None`` (default) nothing changes.
     """
     if not isinstance(target, str) or not target.strip():
         raise PipelineError("Target dialogue must be a non-empty string.")
@@ -436,7 +457,8 @@ def run_pipeline_v2(
     _banner("VIDEO DIALOGUE LOCALIZATION PIPELINE (V2 COARSE-TO-FINE)")
     print(f"Coarse tiers: {', '.join(coarse_tiers)}  Fine model: {fine_model}")
 
-    video_path_resolved, wav_path = _prepare_media(url, proxy, video_path, audio_path)
+    video_path_resolved, wav_path = _prepare_media(url, proxy, video_path,
+                                                   audio_path, progress=progress)
 
     # Stages 3-9: coarse ASR -> regions -> fine ASR -> validate -> align.
     _stage_header(3, 5, "COARSE-TO-FINE CASCADE")
@@ -453,7 +475,8 @@ def run_pipeline_v2(
             device=device,
             compute_type=compute_type,
             regions_dir=regions_dir,
-            log=lambda msg: print(f"  {msg}"),
+            log=log if log is not None else (lambda msg: print(f"  {msg}")),
+            progress=progress,
         )
     except MatchNotFoundError as e:
         raise PipelineError(f"Target dialogue not found: {e}") from e
@@ -474,6 +497,8 @@ def run_pipeline_v2(
           f"(tier {cascade.fallback_tier}, aligned={cascade.aligned})")
 
     # Stage 10-11: frame extraction at the precise GLOBAL timestamp.
+    if progress:
+        progress("frame_extraction", "Extracting frame at matched timestamp...")
     frame = run_frame_extraction_stage(video_path_resolved, global_timestamp)
 
     result = PipelineResult(
@@ -501,6 +526,7 @@ def run_pipeline_v2(
         fallback_tier=cascade.fallback_tier,
         aligned=cascade.aligned,
         timestamp_hhmmss=format_timestamp(global_timestamp),
+        stage_timings=dict(cascade.timings),
     )
 
     saved = result.save() if save_result else OUTPUT_DIR / "result.json"

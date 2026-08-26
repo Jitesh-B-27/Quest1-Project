@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Video Dialogue Locator</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <main class="page">
+    <header class="page-header">
+      <h1 class="title-lg">Video Dialogue Locator</h1>
+      <p class="subtitle">Coarse-to-fine pipeline &middot; V2</p>
+    </header>
+
+    <!-- Input card -->
+    <section class="card">
+      <form id="run-form">
+        <label class="label" for="url">Video URL</label>
+        <input class="input" id="url" name="url" type="text"
+               placeholder="https://www.youtube.com/watch?v=..." autocomplete="off" />
+
+        <label class="label" for="target">Target Dialogue</label>
+        <input class="input" id="target" name="target" type="text"
+               placeholder='e.g. "My mind rebels at stagnation"' autocomplete="off" />
+
+        <div class="form-actions">
+          <button class="btn btn-primary" id="run-btn" type="submit">Run Pipeline</button>
+          <span class="hint" id="busy-hint" hidden>A job is already running&hellip;</span>
+        </div>
+      </form>
+    </section>
+
+    <!-- Status + stage timeline -->
+    <section class="card" id="status-card" hidden>
+      <div class="card-head">
+        <h2 class="title-md">Progress</h2>
+        <span class="elapsed subtle" id="elapsed">&nbsp;</span>
+      </div>
+      <div class="current-stage" id="current-stage">&nbsp;</div>
+
+      <ul class="stage-list" id="stage-list"></ul>
+
+      <div class="log-head">
+        <span class="label">Log</span>
+        <label class="switch-wrap">
+          <span class="subtle small">Auto-scroll</span>
+          <input type="checkbox" id="autoscroll" checked />
+          <span class="switch"><span class="thumb"></span></span>
+        </label>
+      </div>
+      <pre class="log-panel" id="log-panel"></pre>
+    </section>
+
+    <!-- Result card -->
+    <section class="card result-card" id="result-card" hidden>
+      <h2 class="title-md">Result</h2>
+      <div id="error-banner" class="banner banner-error" hidden></div>
+
+      <div class="result-grid">
+        <figure class="frame-figure">
+          <img id="frame-img" alt="Extracted frame" hidden />
+          <figcaption class="subtle small" id="frame-caption"></figcaption>
+        </figure>
+
+        <div class="result-details">
+          <div class="matched-text title-md" id="matched-text"></div>
+          <div class="timestamp-xl" id="timestamp-hms"></div>
+
+          <dl class="stat-rows">
+            <div class="row"><dt>Frame number</dt><dd id="frame-number"></dd></div>
+            <div class="row"><dt>Similarity</dt><dd id="similarity"></dd></div>
+            <div class="row"><dt>Total runtime</dt><dd id="total-runtime"></dd></div>
+            <div class="row"><dt>Precision timestamp</dt><dd id="timestamp-s"></dd></div>
+          </dl>
+
+          <div class="badges" id="badges"></div>
+
+          <dl class="stat-rows secondary">
+            <div class="row"><dt>Coarse ASR time</dt><dd id="t-coarse"></dd></div>
+            <div class="row"><dt>Fine ASR validation time</dt><dd id="t-fine"></dd></div>
+            <div class="row"><dt>Forced alignment time</dt><dd id="t-align"></dd></div>
+            <div class="row"><dt>Fallback tier</dt><dd id="tier"></dd></div>
+            <div class="row"><dt>Avg / min word probability</dt><dd id="probs"></dd></div>
+          </dl>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
