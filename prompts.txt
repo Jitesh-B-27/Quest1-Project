@@ -1,0 +1,1689 @@
+Agentic ai based development prompts:
+
+PROMPT-1:
+i need you to build a python script that takes a video url as input. the video url might be from different platforms such as youtube or other similar platforms. use yt-dlp module for downloading the video. upload the resultant mp4 file locally under /video directory. also include a cli interface. build this.
+
+PROMPT-2:
+i need you to build a python module that takes the .mp4 file from the /video folder and processes it. this module should extract the audio file from the .mp4 folder using the best python libraries and should store the resultant audio.wav file inside of a /audio folder. add necessary error handling for this module. also include a cli interface. build the module in such a way that it could be easily imported and used in a pipeline. build this.
+
+PROMPT-3:
+ASR Module Specification (V1 Baseline)1. Objective & Scope
+Implement the ASR (Automatic Speech Recognition) stage for the video-dialogue localization pipeline. This module takes an extracted audio file, runs transcription via faster-whisper on a CPU, extracts chronologically-ordered word-level timestamps with raw model probabilities, and persists the structured result to a JSON file and returns it via an importable Python API and CLI.
+
+
+CRITICAL NON-GOALS: Do NOT implement target matching, fuzzy matching, frame extraction, custom VAD, or any downstream pipeline components.
+
+
+2. Core Architecture & Requirements
+Inputs & Outputs
+Input Path: audio/audio.wav
+
+
+Output Artifact: transcript/transcript.json (created automatically if missing)
+
+
+Python API Return: Strongly-typed TranscriptResult object containing metadata and flat word objects.
+
+
+Model & Runtime (faster-whisper)
+Backend: CTranslate2 / faster-whisper
+
+
+Default Settings:
+
+
+Model Size: small (configurable: tiny, base, small, medium)
+
+
+Device: cpu (configurable)
+
+
+Compute Type: int8 (configurable, CPU-compatible)
+
+
+Language: en (configurable)
+
+
+VAD Filter: vad_filter=True (using built-in Silero VAD)
+
+
+Word Timestamps: word_timestamps=True (Required)
+
+
+Word Object Schema
+Each element in the flattened word list must preserve:
+
+
+JSON
+{
+    "word": "string",
+    "start": 0.000,
+    "end": 0.000,
+    "probability": 0.000
+}
+Preserve raw faster-whisper word probability (do not modify or convert to custom confidence).
+
+
+Preserve sub-second float precision for timestamps.
+
+
+Metadata Schema
+Record benchmarks and runtime configuration:
+
+
+input_audio, model, device, compute_type, language
+
+
+audio_duration_seconds, processing_time_seconds (via monotonic timer)
+
+
+word_count, segment_count
+
+
+3. Interfaces
+Python API
+Python
+from asr import Transcriber, TranscriptResult
+
+
+transcriber = Transcriber(
+    model_size="small",
+    device="cpu",
+    compute_type="int8",
+    language="en"
+)
+
+
+result: TranscriptResult = transcriber.transcribe("audio/audio.wav")
+CLI Interface
+Bash
+python -m asr.transcriber \
+    --input audio/audio.wav \
+    --output transcript/transcript.json \
+    --model small \
+    --language en \
+    --device cpu \
+    --compute-type int8
+Defaults must allow running simply via python -m asr.transcriber.
+
+
+Fail with clean error messages and non-zero exit codes on bad inputs/failures (no raw tracebacks).
+
+
+4. Input Validation & Error Handling
+Before execution, validate:
+
+
+File exists, is a file, and is readable.
+
+
+File is non-empty and decodable.
+Raise custom exceptions for validation failures, model load errors, or processing errors.
+
+4. Implement the V1 Target Dialogue Matching module for our video-dialogue
+localization project.
+
+IMPORTANT:
+- Keep the implementation simple and easy to understand.
+- Do not over-engineer the module or create excessive abstractions.
+- Make it easy to modify later when we optimize the matching algorithm.
+- Do NOT implement frame extraction, OCR, embeddings, LLM calls, or any
+  other future optimization.
+- The existing ASR module is already implemented and working. Do not
+  modify it.
+
+==================================================
+INPUT
+==================================================
+
+The ASR module has generated:
+
+    transcript/transcript.json
+
+Its structure contains:
+
+    metadata
+    words[]
+
+Each word contains:
+
+    word
+    start
+    end
+    probability
+
+Example:
+
+{
+    "word": "rebels",
+    "start": 326.24,
+    "end": 326.68,
+    "probability": 0.91
+}
+
+The target dialogue is provided as a string, for example:
+
+    "My mind rebels at stagnation"
+
+==================================================
+OBJECTIVE
+==================================================
+
+Find the occurrence in the transcript that most closely matches the
+target dialogue.
+
+The module must return:
+
+    - target text
+    - matched text
+    - start timestamp
+    - end timestamp
+    - text similarity score
+    - average word probability
+    - minimum word probability
+    - matched words
+    - top candidate matches (preferably top 3-5)
+
+The start timestamp is the important output because the next pipeline
+stage will use it to extract the corresponding video frame.
+
+==================================================
+MATCHING FLOW
+==================================================
+
+Implement this straightforward V1 pipeline:
+
+    transcript.json
+          ↓
+    load transcript
+          ↓
+    normalize target text
+          ↓
+    normalize transcript words
+          ↓
+    generate sliding windows
+          ↓
+    compare target against each window
+          ↓
+    calculate text similarity
+          ↓
+    collect word probabilities
+          ↓
+    rank candidates
+          ↓
+    return best MatchResult
+
+==================================================
+NORMALIZATION
+==================================================
+
+Implement basic normalization only:
+
+- lowercase
+- remove/normalize punctuation
+- normalize whitespace
+- basic apostrophe handling
+
+Use the same normalization logic for the target and transcript words.
+
+Do not implement advanced NLP normalization.
+
+==================================================
+SLIDING WINDOW
+==================================================
+
+If the target contains N words, examine candidate windows around that
+size.
+
+For V1 use:
+
+    N-2 through N+2
+
+with appropriate bounds for short targets.
+
+For example, a 5-word target should examine windows of:
+
+    3, 4, 5, 6, 7 words
+
+Each candidate must preserve the original Word objects so that the
+original timestamps and probabilities are available.
+
+==================================================
+SIMILARITY
+==================================================
+
+Use a simple lexical/edit-distance based similarity for V1.
+
+Return a normalized score:
+
+    0.0 = completely different
+    1.0 = exact match
+
+Do not use embeddings, LLMs, semantic search, or complex scoring.
+
+Text similarity must be the PRIMARY ranking signal.
+
+==================================================
+CONFIDENCE
+==================================================
+
+For every candidate, calculate:
+
+    average_word_probability
+    minimum_word_probability
+
+using the raw probabilities already present in transcript.json.
+
+Do NOT modify the raw probabilities.
+
+Do NOT create a complicated weighted confidence formula in V1.
+
+Confidence should be returned as supporting information. We will decide
+later how it should influence ranking after benchmarking.
+
+==================================================
+TIMESTAMPS
+==================================================
+
+For the selected candidate:
+
+    start_time = start timestamp of its first word
+    end_time   = end timestamp of its last word
+
+Do NOT use the enclosing Whisper segment timestamp.
+
+Preserve sufficient timestamp precision.
+
+==================================================
+RESULT
+==================================================
+
+Create a simple MatchResult data structure.
+
+Conceptually:
+
+    MatchResult:
+        target_text
+        matched_text
+        start_time
+        end_time
+        text_similarity
+        average_word_probability
+        minimum_word_probability
+        matched_words
+        candidates
+
+The candidates list should contain the top few candidate matches and
+their scores so that future ranking improvements can use them.
+
+==================================================
+API
+==================================================
+
+The module must be easily importable into the future pipeline.
+
+Provide a simple API similar to:
+
+    from matcher import DialogueMatcher
+
+    matcher = DialogueMatcher()
+
+    result = matcher.find_best_match(
+        "My mind rebels at stagnation",
+        "transcript/transcript.json"
+    )
+
+Avoid requiring subprocess/CLI calls from the main pipeline.
+
+==================================================
+CLI
+==================================================
+
+Also provide a simple CLI for testing.
+
+Example:
+
+    python -m matcher \
+        --transcript transcript/transcript.json \
+        --target "My mind rebels at stagnation"
+
+Support sensible defaults where appropriate.
+
+The CLI should print:
+
+    Target
+    Best matched text
+    Start timestamp
+    End timestamp
+    Similarity
+    Average probability
+    Minimum probability
+
+Also indicate if no reasonable candidate was found.
+
+==================================================
+ERROR HANDLING
+==================================================
+
+Handle cleanly:
+
+- transcript file does not exist
+- invalid JSON
+- missing/invalid words field
+- malformed word entries
+- empty transcript
+- empty target text
+- invalid target
+- no candidate windows
+
+Do not silently return a false successful match.
+
+Use clear exceptions/messages and a non-zero CLI exit code on failure.
+
+==================================================
+DESIGN REQUIREMENTS
+==================================================
+
+Keep the code small and straightforward.
+
+Separate the major operations enough that they can be independently
+modified later:
+
+    normalization
+    candidate generation
+    similarity calculation
+    candidate ranking
+
+Do not create unnecessary classes or layers.
+
+The future optimization work may replace the similarity/ranking logic,
+so those parts should be easy to modify without rewriting the rest of
+the module.
+
+Do not modify the existing ASR module.
+
+==================================================
+TESTING
+==================================================
+
+Add basic tests for:
+
+1. Exact match.
+2. Case/punctuation differences.
+3. Slight transcription difference.
+4. Candidate window generation.
+5. Timestamp extraction.
+6. Confidence calculation.
+7. Empty/invalid transcript.
+8. Empty target.
+9. No reasonable match.
+
+Use small synthetic transcript data for unit tests.
+
+==================================================
+DEFINITION OF DONE
+==================================================
+
+The module is complete when:
+
+- transcript.json can be loaded.
+- Target text can be normalized.
+- Sliding windows are generated.
+- Candidates are compared using lexical similarity.
+- Candidates are ranked.
+- Word probabilities are preserved and reported.
+- Best candidate timestamps are returned.
+- Top candidates are retained.
+- MatchResult can be consumed directly by Python code.
+- CLI works.
+- Basic error handling and tests exist.
+- No future-stage functionality is implemented.
+
+After implementation, briefly report:
+- files created/modified
+- dependencies added
+- CLI usage
+- Python API usage
+- tests performed
+
+5. Implement the V1 Frame Extraction module for our video-dialogue
+localization project.
+
+Keep it simple and practical. Do not over-engineer it. The module must
+be easy to modify later for timestamp/frame accuracy improvements and
+easy to import into the main pipeline.
+
+==================================================
+PIPELINE CONTEXT
+==================================================
+
+The existing pipeline is:
+
+Video URL
+   ↓
+Video Downloader              [DONE]
+   ↓
+video/*.mp4
+   ↓
+Audio Extraction              [DONE]
+   ↓
+audio/video1.wav
+   ↓
+ASR                           [DONE]
+   ↓
+transcript/transcript.json
+   ↓
+Target Matcher                [DONE]
+   ↓
+MatchResult
+   ↓
+Frame Extraction              [YOU ARE IMPLEMENTING THIS]
+   ↓
+frame image + metadata
+
+The matcher provides:
+
+    start_time
+    end_time
+    matched_text
+    similarity
+    etc.
+
+The frame extractor primarily needs the matcher's start_time.
+
+==================================================
+OBJECTIVE
+==================================================
+
+Given:
+
+    video file
+    dialogue start timestamp
+
+identify and save the corresponding video frame.
+
+For example:
+
+    timestamp = 324.990 seconds
+
+should produce:
+
+    frame image
+    frame number
+    actual timestamp
+    video metadata
+
+This is a V1 baseline. Do not implement visual analysis, OCR,
+neighboring-frame search, or AI-based frame verification.
+
+==================================================
+INPUT
+==================================================
+
+The main Python API should accept:
+
+    video_path
+    timestamp
+
+Example:
+
+    extractor.extract_at_timestamp(
+        "video/video.mp4",
+        324.990
+    )
+
+==================================================
+VIDEO METADATA
+==================================================
+
+Use a suitable local video-processing library. Prefer the project's
+existing FFmpeg setup if appropriate; otherwise use a simple,
+well-supported Python library.
+
+Read at least:
+
+    FPS
+    frame count
+    duration
+    width
+    height
+
+These values should be included in the result.
+
+==================================================
+FRAME SELECTION
+==================================================
+
+For the V1 implementation, map the timestamp to the corresponding
+video frame using the video's timing/FPS information.
+
+For a constant-frame-rate video, the basic relationship is:
+
+    frame_index ≈ timestamp * FPS
+
+Do not simply assume a fixed FPS such as 25 or 30.
+
+Use the video's actual metadata.
+
+Preserve the timestamp precision.
+
+The selected frame should represent the video frame corresponding to
+the dialogue start timestamp supplied by the matcher.
+
+Do not add complicated timestamp correction logic in V1.
+
+==================================================
+FRAME OUTPUT
+==================================================
+
+Save the extracted frame as an image.
+
+Default output directory:
+
+    frames/
+
+Create the directory if it does not exist.
+
+The filename can contain the frame number, for example:
+
+    frames/frame_8125.jpg
+
+Preserve the video's original resolution.
+
+==================================================
+RESULT
+==================================================
+
+Create a simple structured result, for example:
+
+    FrameResult:
+        timestamp
+        frame_number
+        actual_timestamp
+        image_path
+        fps
+        frame_count
+        duration
+        width
+        height
+
+The result must be easy for the final pipeline to consume.
+
+==================================================
+PUBLIC API
+==================================================
+
+Provide a simple importable API such as:
+
+    from frame_extractor import FrameExtractor
+
+    extractor = FrameExtractor()
+
+    result = extractor.extract_at_timestamp(
+        "video/video.mp4",
+        324.990
+    )
+
+The API must not require invoking a subprocess/CLI.
+
+==================================================
+CLI
+==================================================
+
+Provide a simple CLI for testing:
+
+    python -m frame_extractor \
+        --video video/video.mp4 \
+        --timestamp 324.990 \
+        --output frames/frame.jpg
+
+Print:
+
+    Video
+    Timestamp
+    Frame number
+    Actual frame timestamp
+    FPS
+    Resolution
+    Output image path
+
+Provide --help.
+
+==================================================
+ERROR HANDLING
+==================================================
+
+Handle cleanly:
+
+- video file does not exist
+- video cannot be opened
+- invalid timestamp
+- negative timestamp
+- timestamp beyond video duration
+- invalid/missing video metadata
+- frame cannot be decoded
+- output directory cannot be created
+- image cannot be written
+
+Do not silently return an invalid frame.
+
+CLI failures should produce a clear error and non-zero exit code.
+
+==================================================
+DESIGN
+==================================================
+
+Keep the implementation small.
+
+Separate only the useful responsibilities:
+
+    video validation / metadata
+    timestamp → frame selection
+    frame extraction
+    result construction
+
+Do not create unnecessary abstraction layers.
+
+Keep timestamp-to-frame logic isolated so that it can easily be replaced
+later when we investigate more accurate seeking, VFR videos, timestamp
+offsets, or neighboring-frame verification.
+
+Do not modify the existing downloader, audio extraction, ASR, or matcher
+modules.
+
+==================================================
+TESTING
+==================================================
+
+Add unit tests for at least:
+
+1. Timestamp → frame calculation.
+2. Zero timestamp.
+3. Normal timestamp.
+4. Invalid/negative timestamp.
+5. Timestamp beyond video duration.
+6. Invalid/missing video handling.
+7. Result structure.
+
+If practical, add one small integration test using a short generated
+test video to verify that an actual frame can be extracted.
+
+Do not require the 54-minute production video for unit tests.
+
+Run all tests after implementation and report the results.
+
+==================================================
+DEFINITION OF DONE
+==================================================
+
+The module is complete when:
+
+- A timestamp can be converted to the corresponding frame.
+- The frame can be saved as an image.
+- Frame metadata is returned.
+- The module works through a Python API.
+- The CLI works.
+- Errors are handled cleanly.
+- Unit tests pass.
+- The implementation remains simple and easy to modify.
+- Existing modules remain untouched.
+
+After implementation, briefly report:
+- files created
+- dependencies added
+- CLI usage
+- Python API usage
+- tests performed and results
+
+6. Implement a single `pipeline.py` that integrates all existing V1 modules
+into one end-to-end pipeline.
+
+Keep this simple. Do not modify or redesign the existing modules.
+
+==================================================
+EXISTING MODULES
+==================================================
+
+The project already contains:
+
+1. Video Downloader
+2. Audio Extraction
+3. ASR
+4. Target Matcher
+5. Frame Extractor
+
+The pipeline must import and use these modules through their Python APIs,
+NOT by spawning subprocesses.
+
+First inspect the existing module APIs and integrate with their actual
+interfaces. Do not assume function/class names if they differ from the
+current implementation.
+
+==================================================
+PIPELINE INPUT
+==================================================
+
+The pipeline has exactly two required inputs:
+
+    1. Video URL
+    2. Target dialogue sentence
+
+Example:
+
+    python pipeline.py \
+        --url "https://example.com/video" \
+        --target "My mind rebels at stagnation"
+
+==================================================
+PIPELINE FLOW
+==================================================
+
+The complete workflow must be:
+
+    Video URL
+        ↓
+    Video Downloader
+        ↓
+    local video file
+        ↓
+    Audio Extraction
+        ↓
+    audio WAV file
+        ↓
+    ASR
+        ↓
+    transcript JSON / TranscriptResult
+        ↓
+    Target Matcher
+        ↓
+    MatchResult
+        ↓
+    Frame Extractor
+        ↓
+    FrameResult
+        ↓
+    Final Pipeline Result
+
+Each stage must consume the output of the previous stage directly where
+possible.
+
+Do not unnecessarily reload data from disk when an in-memory result is
+already available. Persist intermediate artifacts where the existing
+modules already support it because they are useful for debugging and
+reproducibility.
+
+==================================================
+EXPECTED FILE FLOW
+==================================================
+
+Maintain the existing project directories.
+
+Conceptually:
+
+    URL
+      ↓
+    video/<downloaded_video>.mp4
+      ↓
+    audio/<audio>.wav
+      ↓
+    transcript/transcript.json
+      ↓
+    matcher result
+      ↓
+    frames/<matched_frame>.jpg
+
+Use the actual output paths returned by the existing modules rather than
+hard-coding filenames if the modules already expose them.
+
+==================================================
+STAGE ORDER
+==================================================
+
+The pipeline must execute exactly in this order:
+
+1. Download video
+2. Extract audio
+3. Run ASR
+4. Match target dialogue
+5. Extract frame
+
+Do not run later stages if an earlier stage fails.
+
+==================================================
+TERMINAL PROGRESS OUTPUT
+==================================================
+
+This is important.
+
+The terminal should clearly show what the pipeline is currently doing.
+
+For example:
+
+    ============================================================
+    VIDEO DIALOGUE LOCALIZATION PIPELINE
+    ============================================================
+
+    [1/5] VIDEO DOWNLOAD
+    URL: ...
+    Status: Downloading...
+    Status: Complete
+    Output: video/...
+
+    [2/5] AUDIO EXTRACTION
+    Input: video/...
+    Status: Extracting audio...
+    Status: Complete
+    Output: audio/...
+
+    [3/5] ASR
+    Model: small
+    Device: cpu
+    Compute type: int8
+    Status: Transcribing...
+    Status: Complete
+    Duration: ...
+    Words: ...
+    Output: transcript/...
+
+    [4/5] TARGET MATCHING
+    Target: "My mind rebels at stagnation"
+    Status: Searching transcript...
+    Status: Match found
+    Matched text: ...
+    Similarity: ...
+    Timestamp: ...
+
+    [5/5] FRAME EXTRACTION
+    Timestamp: ...
+    Status: Extracting frame...
+    Status: Complete
+    Frame: ...
+    Image: ...
+
+    ============================================================
+    PIPELINE COMPLETE
+    ============================================================
+
+    Final Result:
+    Timestamp: ...
+    Frame: ...
+    Text: ...
+    Image: ...
+
+The exact formatting can be cleaner/different, but every stage must
+clearly communicate:
+
+- current stage
+- input
+- important configuration
+- processing status
+- completion/failure
+- output
+- important metrics
+
+Do not print the entire transcript or excessive logs to the terminal.
+
+==================================================
+FINAL RESULT
+==================================================
+
+The final pipeline result should combine the outputs from the matcher
+and frame extractor.
+
+At minimum include:
+
+    target_text
+    matched_text
+    timestamp
+    frame_number
+    frame_image_path
+    similarity
+    average_word_probability
+    minimum_word_probability
+
+Also include useful video/frame metadata already returned by the
+FrameResult.
+
+Create a simple structured `PipelineResult` data structure.
+
+It should be convertible to JSON/dictionary.
+
+Optionally save the final result to something such as:
+
+    output/result.json
+
+if this fits naturally with the existing project structure.
+
+Do not duplicate unnecessary data.
+
+==================================================
+CLI
+==================================================
+
+Provide:
+
+    python pipeline.py \
+        --url "<VIDEO_URL>" \
+        --target "<TARGET_SENTENCE>"
+
+Optional configuration arguments may expose existing module settings,
+for example:
+
+    --model
+    --language
+    --device
+    --compute-type
+
+Use the existing ASR defaults unless overridden:
+
+    model = small
+    device = cpu
+    compute_type = int8
+    language = en
+
+Do not expose unnecessary low-level configuration.
+
+The pipeline should have useful `--help`.
+
+==================================================
+ERROR HANDLING
+==================================================
+
+If any stage fails:
+
+- clearly identify which stage failed
+- print a concise useful error
+- stop the pipeline
+- return a non-zero exit code
+
+Examples:
+
+    Video download failed
+    Audio extraction failed
+    ASR failed
+    Target dialogue not found
+    Frame extraction failed
+
+Do not continue to later stages with invalid/missing output.
+
+Do not swallow exceptions.
+
+==================================================
+DATA FLOW / DESIGN
+==================================================
+
+Keep `pipeline.py` simple.
+
+Have one main orchestration function, conceptually:
+
+    run_pipeline(url, target) -> PipelineResult
+
+The function should:
+
+    download
+    extract audio
+    transcribe
+    match
+    extract frame
+    construct final result
+
+Use the existing module classes and result objects.
+
+Do not duplicate the implementation of any existing module inside
+pipeline.py.
+
+Do not modify existing modules unless absolutely necessary for a clean
+public API integration. Prefer adapting pipeline.py to their existing
+interfaces.
+
+The pipeline must remain easy to modify later when we optimize
+individual stages.
+
+==================================================
+IMPORTANT
+==================================================
+
+This is the V1 baseline.
+
+Do NOT add:
+
+- parallel processing
+- caching systems
+- retries beyond what existing modules already provide
+- complex workflow frameworks
+- multiprocessing
+- async orchestration
+- optimization logic
+- new matching algorithms
+- new ASR logic
+- frame verification
+- OCR
+- LLMs
+
+The purpose is simply to correctly connect the five existing modules.
+
+==================================================
+TESTING
+==================================================
+
+Add a small number of tests for the pipeline orchestration.
+
+Do not redownload/process the 54-minute production video in unit tests.
+
+Mock or stub the existing modules and verify:
+
+1. Correct stage order.
+2. Output from one stage is passed to the next.
+3. Pipeline stops when a stage fails.
+4. Final PipelineResult contains the expected fields.
+5. CLI validates required inputs.
+
+If practical, run one real end-to-end test using the existing production
+video and target sentence, but do not make this mandatory for every test
+run because ASR is CPU-intensive.
+
+==================================================
+DEFINITION OF DONE
+==================================================
+
+The implementation is complete when:
+
+- `pipeline.py` can be run with a URL and target sentence.
+- All five existing modules execute in the correct order.
+- Data flows correctly between stages.
+- Intermediate artifacts are stored in their existing directories.
+- Terminal output clearly shows progress through every stage.
+- Final result contains timestamp, frame number, dialogue text and image
+  path.
+- Errors stop the pipeline cleanly.
+- Python API and CLI both work.
+- Existing modules remain unchanged.
+- Tests pass.
+
+After implementation, briefly report:
+- pipeline.py structure
+- actual APIs used from each module
+- CLI usage
+- final output format
+- tests performed and results
+
+7. go through the codebase. you need to build the necessary module for performing asr using whisper base. make sure that you install every library required for whisper base. the asr module should be designed such that it should abstract for both faster whisper and whisper base models. the core asr module's contract should remain the same in the sense that it takes audio file as input and generates a transcript.json as output. but now it should take additional parameter of the model name and model type such as base, tiny, small etc. as of now you only need to build whiseper base model for asr and integrate it with asr for abstraction. the asr should be integrated in the pipeline comfortably. in the pipeline, make changes to cache the already downloaded video and audio files. this should be optional, that is if the video and audio files already exists and if we give their directories as path, it should use them directly instead of starting stage 1 and stage 2. please dont break anything else. your primary task is to create the module for using whisper base for asr and to refactor asr module to use both whisper and faster whisper and to modify the pipeline to cache already existing video and audio. implement cli for asr, if already exists, modify it to include whisper and the type of model. also develop the whisper module specially for cpu usage and not for gpu. optimize it for cpu usage
+8. the integration of whisper in asr module is extremely successful and works just as expected. now use the same input and output contract, same rules that you used to build and integrate whisper to build whisperx and integrate it with asr. asr module should abstract for whisperx as well. build necessary cli interface and it should be usable in the pipeline by importing asr. install and import the necessary libraries for whisperx and we should have support for base, tiny, small, medium and large models. 
+9. i want you to go through the asr module and all the current module providers. look if each module provider is efficiently optimized to use the cpu 100% efficiently. dont build anything just tell me if the model providers are completely optimized for cpu usage.
+10. i want you to optimize faster whisper completely. it has to be as efficient as possible and should completely utilize cpu capacity. do not break any working code and only try to optimize the faster whispers capacity to efficiently utilize cpu as much as possible. do not do this for other model providers. only do this for faster whisper
+11. go through the matcher module. i want you to use rapid fuzz as the similarity engine by replacing the existing sequence matcher. dont change anything else. only the similarity engine has to be changed to rapid fuzz. 
+12. go through the complete codebase. understand the current architecture and pipleline flow. based on the benchmarking of multiple models to achieve a proper tradoff between processing time and model accuracy i have decided to go with a coarse and fine architecture as my version 2 architecture.
+
+Full audio   ↓
+Coarse ASR (base/tiny)
+   ↓
+Generate Top-K candidate regions
+   ↓
+Fine ASR (small/medium) on only those regions
+   ↓
+Re-score / validate candidates
+   ↓
+Select best candidate
+   ↓
+Forced alignment on that small winning region
+   ↓
+Precise word onset timestamp
+   ↓
+Frame extraction
+
+this is the high level design of the next architecture. i need you to brainstorm about this architecture. tell me if this architecture could be a good architecture providing a good tradeoff between processing time and model accuracy. you dont need to build anything now. i only want you to plan this architecture. also we need to handle the case where the coarse model completely misses the target. first plan this architecture. ultimately also plan about how to convert the current codebase efficiently to the next architecture by reusing most of the existing components. since the current pipeline is working end to end, this pipeline is the correct version1. we need to optimize this pipeline to the next architecture by building on top of this. please analyze the implementation part as well.
+
+13. We need to plan the migration of the existing working V1 pipeline to a V2
+coarse-to-fine architecture.
+
+IMPORTANT: PLAN ONLY. Do not implement anything yet.
+
+First inspect the existing codebase carefully and reuse the current modules
+wherever possible. The goal is a minimal architectural migration, not a
+rewrite. Avoid unnecessary abstractions, classes, provider changes, or
+complexity.
+
+CURRENT WORKING PIPELINE
+
+URL
+→ video download
+→ audio extraction
+→ full-audio ASR
+→ RapidFuzz/dialogue matcher
+→ matched timestamp
+→ frame extraction
+→ result
+
+The existing downloader, audio extractor, ASR abstraction, matcher,
+frame extractor and pipeline are already working.
+
+V2 GOAL
+
+Replace only the expensive full-quality ASR/search portion with:
+
+Full audio
+    ↓
+1. COARSE ASR — faster-whisper tiny over full audio
+    ↓
+2. Generate Top-5 fuzzy candidate regions
+    ↓
+3. Pad candidate regions by approximately ±5 seconds
+    ↓
+4. Merge overlapping candidate regions
+    ↓
+5. Extract those regions as temporary WAV files using existing FFmpeg
+    ↓
+6. FINE ASR — faster-whisper small on candidate regions only
+    ↓
+7. RapidFuzz re-score candidates against target
+    ↓
+8. Select best validated candidate
+    ↓
+9. Forced alignment on ONLY the winning short region
+    ↓
+10. Convert refined LOCAL timestamp → GLOBAL original-video timestamp
+    ↓
+11. Existing FrameExtractor
+    ↓
+Final result
+
+The coarse stage optimizes RECALL.
+The fine stage optimizes PRECISION.
+Forced alignment optimizes TIMESTAMP ACCURACY.
+
+FALLBACK
+
+Keep fallback simple:
+
+tiny full-audio
+    ↓
+Top-5 → fine small
+    ↓
+if fine validation fails:
+    base full-audio
+    ↓
+Top-5 → fine small
+    ↓
+if still unsuccessful:
+    full-audio small (existing V1 behavior)
+    ↓
+if still unsuccessful:
+    MatchNotFound
+
+Do not reject potentially useful regions aggressively based only on the
+tiny-model similarity. Fine ASR should be the real validation stage.
+
+TIMESTAMP ACCURACY — CRITICAL
+
+The problem specifically requires:
+
+Timestamp : HH:MM:SS.sss
+Frame     : <Frame number>
+Text      : "target dialogue"
+
+plus the corresponding frame image.
+
+Therefore timestamp handling must be designed very carefully.
+
+Candidate WAV timestamps from fine ASR/alignment are LOCAL to the extracted
+clip.
+
+Example:
+
+candidate global start = 320.000s
+aligned local target start = 4.918s
+
+final global timestamp = 324.918s
+
+Only this GLOBAL timestamp may be passed to FrameExtractor.
+
+Preserve millisecond precision throughout the pipeline. Do not round
+timestamps internally just for display.
+
+Forced alignment should run only after the winning candidate has been
+selected. If alignment fails, gracefully fall back to the fine-ASR word
+timestamp rather than failing the complete pipeline.
+
+The final result must expose at minimum:
+
+- precise global timestamp in seconds
+- formatted HH:MM:SS.sss timestamp
+- frame number
+- matched dialogue text
+- corresponding frame image path
+- similarity/confidence information
+- whether forced alignment succeeded
+- which fallback tier/model was used
+
+V1 must remain available, preferably through:
+
+    --arch v1
+    --arch v2
+
+so V1 and V2 can be benchmarked and V1 can remain the correctness/fallback
+reference.
+
+IMPLEMENTATION CONSTRAINTS
+
+Do NOT:
+- rewrite existing working modules
+- modify all ASR providers just to support candidate slicing
+- introduce complex audio-array infrastructure
+- introduce async/multiprocessing
+- build unnecessary frameworks/managers/services
+- over-engineer fallback logic
+
+Prefer extracting short candidate WAVs with the existing FFmpeg setup and
+passing those paths through the existing ASR API.
+
+A small `CandidateRegion` structure and a small localization/cascade module
+are sufficient if needed.
+
+TESTING PLAN MUST COVER
+
+- correct Top-K candidate generation
+- padding and overlapping-region merging
+- fine candidate validation
+- tiny → base → small fallback behavior
+- local → global timestamp conversion
+- millisecond precision preservation
+- alignment success and alignment-failure fallback
+- correct final timestamp passed to FrameExtractor
+- V1 remains unaffected
+
+Also plan a benchmark comparing V1 vs V2 using the existing production
+video, including total runtime, coarse/fine/alignment time, similarity,
+final timestamp and frame number.
+
+Now inspect the existing repository and produce a concise implementation
+plan identifying:
+
+1. what can be reused unchanged
+2. what minimally needs modification
+3. what small new components/files are required
+4. exact V2 data flow
+5. timestamp/offset handling
+6. fallback flow
+7. tests required
+
+Do not write code yet.
+
+14. Update the V2 implementation plan with the following corrections. PLAN ONLY — do not implement yet.
+
+1. Coarse stage:
+   - `tiny` is purely a high-recall stage.
+   - Always send its Top-5 ranked candidates to fine ASR.
+   - Do NOT reject candidates using a coarse similarity threshold.
+   - Fine-stage similarity is the actual validation gate.
+
+2. Forced alignment:
+   - Alignment must use the winning region WAV + the already-generated fine-ASR transcript.
+   - Do NOT perform another ASR transcription inside the aligner.
+   - WhisperX alignment should only refine the word timestamps.
+   - If alignment fails, fall back to the fine-ASR word onset.
+
+3. Fallback:
+   tiny full audio → Top-5 → small fine validation
+       ↓ failure
+   base full audio → Top-5 → small fine validation
+       ↓ failure
+   small full audio + matcher using the EXISTING WAV
+       ↓ failure
+   MatchNotFound
+
+   The V1 fallback must NOT redownload the video or re-extract audio.
+
+4. Timestamp correctness:
+   - `CandidateRegion.global_start` must exactly equal the actual start passed to FFmpeg when extracting that region.
+   - Final timestamp = actual region global_start + local aligned/fine onset.
+   - Preserve floats without intermediate rounding.
+   - Format as `HH:MM:SS.sss` only for final display.
+   - Add tests for normal offsets AND regions clamped at 0/audio-duration boundaries.
+
+5. Temporary region WAVs:
+   - Store under `regions/`.
+   - Delete after successful pipeline completion.
+   - Keep on failure for debugging.
+
+6. Architecture default:
+   - Keep V1 as default until V2 successfully passes the production benchmark.
+   - Keep both `--arch v1` and `--arch v2`.
+
+Keep the rest of the previous plan unchanged. Do not introduce additional abstractions or complexity. Return the revised concise implementation plan for final approval before coding.
+
+15.
+
+Implement a simple FastAPI web interface on top of the existing working V2 pipeline.
+
+Keep this practical and minimal. Do not modify the core ASR, matcher, localizer, frame extractor, downloader, or audio-extraction logic unless a tiny additive hook is required for progress reporting.
+
+## Goal
+
+Running the FastAPI server should expose a local frontend where the user can enter:
+
+* Video URL
+* Target dialogue
+
+and run the complete V2 pipeline.
+
+The UI must show live processing status and finally render:
+
+* matched text
+* timestamp in `HH:MM:SS.sss`
+* frame number
+* extracted frame image
+* similarity
+* total runtime
+* coarse ASR time
+* fine ASR time
+* forced-alignment time
+* fallback tier
+* whether forced alignment succeeded
+
+## Architecture
+
+Use:
+
+```text
+Browser
+   ↓
+POST /api/localize
+   ↓
+background worker thread
+   ↓
+existing run_pipeline_v2(...)
+   ↓
+GET /api/jobs/{job_id} polled every ~1 second
+   ↓
+frontend status/result rendering
+```
+
+Do NOT use WebSockets, SSE, Celery, Redis, databases, queues, or other infrastructure.
+
+Only one pipeline job should run at a time. If another request arrives while a job is running, return HTTP `409` with a clear message.
+
+## API
+
+Implement:
+
+```text
+GET /
+```
+
+Serve the frontend.
+
+```text
+POST /api/localize
+```
+
+Input:
+
+```json
+{
+  "url": "...",
+  "target": "..."
+}
+```
+
+Validate both fields.
+
+Return immediately:
+
+```json
+{
+  "job_id": "..."
+}
+```
+
+```text
+GET /api/jobs/{job_id}
+```
+
+Return something like:
+
+```json
+{
+  "state": "queued|running|done|failed",
+  "current_stage": "coarse_asr",
+  "message": "Running coarse ASR...",
+  "logs": [],
+  "result": null,
+  "error": null
+}
+```
+
+On completion, `result` should reuse `PipelineResult.to_dict()` and only add web-specific fields such as:
+
+```text
+frame_image_url
+```
+
+Do not create a competing result schema.
+
+## Progress reporting
+
+Add only the minimum additive progress hook required to the V2 pipeline.
+
+Stages shown in the UI should be:
+
+```text
+Video Download
+Audio Extraction
+Coarse ASR
+Candidate Generation
+Fine ASR Validation
+Forced Alignment
+Frame Extraction
+Complete
+```
+
+Reuse the existing cascade `log` callback wherever possible.
+
+The web layer only needs:
+
+```text
+current_stage
+message
+rolling logs
+elapsed time
+```
+
+Do not build a complex event/state framework.
+
+## Background execution
+
+Do not run the CPU-heavy pipeline directly inside the FastAPI async request handler.
+
+Run it in a background worker/thread so:
+
+* POST returns immediately
+* FastAPI stays responsive
+* frontend can poll job status
+
+Use a simple in-memory job store protected by `threading.Lock`.
+
+No persistence is required. Jobs may disappear if the server restarts.
+
+## Frontend
+
+Use only vanilla:
+
+```text
+HTML
+CSS
+JavaScript
+```
+
+Keep the first version simple.
+
+Required input UI:
+
+```text
+Video URL
+Target Dialogue
+Run Pipeline button
+```
+
+Do not initially expose Top-K, margins, thresholds, or other algorithmic settings.
+
+Show:
+
+1. A clear current-stage/status area.
+2. Stage progress list.
+3. Small live log panel.
+4. Final result card.
+
+Final result card should prominently show:
+
+```text
+Frame image
+Matched dialogue
+Timestamp: HH:MM:SS.sss
+Frame number
+Similarity
+Total runtime
+```
+
+Secondary details can show:
+
+```text
+Coarse ASR time
+Fine ASR time
+Alignment time
+Fallback tier
+Aligned: Yes/No
+Average/min word probability
+```
+
+Disable the Run button while a job is active.
+
+Show clean error messages if processing fails.
+
+## Static files
+
+Suggested structure:
+
+```text
+webapp/
+  __init__.py
+  main.py
+  jobs.py
+  static/
+    index.html
+    style.css
+    app.js
+```
+
+If `jobs.py` is unnecessary because the implementation is very small, keeping the logic in `main.py` is acceptable.
+
+Mount:
+
+```text
+/frames
+```
+
+using FastAPI `StaticFiles` so the frontend can render generated frame images directly.
+
+Do NOT embed images as base64.
+
+## Server
+
+The app should run using something like:
+
+```powershell
+uvicorn webapp.main:app --host 0.0.0.0 --port 8000
+```
+
+and be accessible at:
+
+```text
+http://localhost:8000
+```
+
+Optionally add a small `run_server.bat` convenience script.
+
+Dependencies should be limited to what is required, primarily:
+
+```text
+fastapi
+uvicorn
+```
+
+## Error handling
+
+Handle cleanly:
+
+* missing URL
+* missing target
+* pipeline already busy
+* unknown job ID
+* pipeline failure
+* dialogue not found
+* frame image missing
+
+API errors should use suitable HTTP status codes and concise JSON errors.
+
+Pipeline failures must appear in the frontend rather than leaving it stuck in "running".
+
+## Testing
+
+Add focused unit/API tests. Do NOT run the expensive production pipeline during normal tests.
+
+Mock the pipeline where appropriate.
+
+Test at minimum:
+
+1. JobStore queued → running → done lifecycle.
+2. JobStore failure lifecycle.
+3. Single-job lock / busy request returns 409.
+4. `POST /api/localize` validates URL and target.
+5. POST returns a job ID.
+6. Unknown job ID returns 404.
+7. Running job status response has stage/message fields.
+8. Completed job returns expected result structure.
+9. Failed job exposes the error.
+10. Progress callback correctly updates job status.
+11. Frame image URL is generated correctly.
+12. Existing pipeline tests still pass.
+
+Use FastAPI `TestClient` for API tests.
+
+Run the complete test suite and report results.
+
+## Important constraints
+
+Do NOT:
+
+* rewrite `pipeline.py`
+* duplicate pipeline logic in FastAPI
+* create a database
+* create a job queue
+* use WebSockets/SSE
+* introduce React/Vue/etc.
+* modify V2 algorithms
+* add unnecessary abstractions
+
+The web application should be a thin presentation/API layer over the already-working V2 pipeline.
+
+After implementation, report:
+
+* files created/modified
+* dependencies added
+* API endpoints
+* how progress reporting is wired
+* how to run the server
+* tests performed and results
+
+After tests pass, do one manual end-to-end run through the browser using a real video URL and verify that the frame, timestamp, text and timings are rendered correctly.
+
+analyze this plan and evaluate this. tell me if this is doable. 
+
+16.
+Use this UI skill:Type: Inter, 16/20px Medium titles, 13/16px Medium labels, 14px Regular body
+- Buttons: 32px height, 10px radius
+- Rows: 40px data, 44px stores
+- Badge: 20px height, 6px radius, #CAFACE fill, #15B042 text
+- Switch: 24x14px, 10px thumb, #0077E6 track
+- Text: #333333 default, #777777 subtle
+
+and then start buidling after writing unit test for each cases
